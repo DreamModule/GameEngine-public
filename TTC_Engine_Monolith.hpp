@@ -760,4 +760,406 @@ namespace Core {
 }
 }
 
+namespace TTC {
+namespace Math {
+
+    struct Quaternion {
+        Fixed32 x, y, z, w;
+
+        Quaternion() : x(0), y(0), z(0), w(Fixed32::One()) {}
+        Quaternion(Fixed32 _x, Fixed32 _y, Fixed32 _z, Fixed32 _w) : x(_x), y(_y), z(_z), w(_w) {}
+
+        static Quaternion Identity() { return Quaternion(Fixed32::Zero(), Fixed32::Zero(), Fixed32::Zero(), Fixed32::One()); }
+
+        Quaternion operator*(const Quaternion& b) const {
+            return Quaternion(
+                w * b.x + x * b.w + y * b.z - z * b.y,
+                w * b.y + y * b.w + z * b.x - x * b.z,
+                w * b.z + z * b.w + x * b.y - y * b.x,
+                w * b.w - x * b.x - y * b.y - z * b.z
+            );
+        }
+
+        Vector3 operator*(const Vector3& v) const {
+            Vector3 u(x, y, z);
+            Fixed32 s = w;
+            Vector3 result = u * (u.Dot(v) * Fixed32::FromInt(2))
+                + v * (s * s - u.Dot(u))
+                + u.Cross(v) * (s * Fixed32::FromInt(2));
+            return result;
+        }
+
+        Fixed32 Dot(const Quaternion& b) const {
+            return x * b.x + y * b.y + z * b.z + w * b.w;
+        }
+
+        Quaternion Normalized() const {
+            Fixed32 lenSq = Dot(*this);
+            if (lenSq <= Fixed32::Epsilon()) return Identity();
+            Fixed32 len = Fixed32::Sqrt(lenSq);
+            return Quaternion(x / len, y / len, z / len, w / len);
+        }
+
+        static Quaternion Slerp(const Quaternion& a, const Quaternion& b, Fixed32 t) {
+            Quaternion z = b;
+            Fixed32 cosTheta = a.Dot(b);
+            if (cosTheta < Fixed32::Zero()) {
+                z = Quaternion(-b.x, -b.y, -b.z, -b.w);
+                cosTheta = -cosTheta;
+            }
+            if (cosTheta > Fixed32::FromFloat(0.9995f)) {
+                return Quaternion(
+                    a.x + (z.x - a.x) * t,
+                    a.y + (z.y - a.y) * t,
+                    a.z + (z.z - a.z) * t,
+                    a.w + (z.w - a.w) * t
+                ).Normalized();
+            }
+            Fixed32 angle = Fixed32::FromFloat(std::acos(cosTheta.ToFloat()));
+            Fixed32 s1 = Fixed32::FromFloat(std::sin((Fixed32::One() - t).ToFloat() * angle.ToFloat()));
+            Fixed32 s2 = Fixed32::FromFloat(std::sin(t.ToFloat() * angle.ToFloat()));
+            Fixed32 s3 = Fixed32::FromFloat(1.0f / std::sin(angle.ToFloat()));
+            return Quaternion(
+                (a.x * s1 + z.x * s2) * s3,
+                (a.y * s1 + z.y * s2) * s3,
+                (a.z * s1 + z.z * s2) * s3,
+                (a.w * s1 + z.w * s2) * s3
+            );
+        }
+
+        Matrix4 ToMatrix() const {
+            Matrix4 m;
+            Fixed32 xx = x * x; Fixed32 yy = y * y; Fixed32 zz = z * z;
+            Fixed32 xy = x * y; Fixed32 xz = x * z; Fixed32 yz = y * z;
+            Fixed32 wx = w * x; Fixed32 wy = w * y; Fixed32 wz = w * z;
+
+            m.m[0][0] = Fixed32::One() - (yy + zz) * Fixed32::FromInt(2);
+            m.m[0][1] = (xy - wz) * Fixed32::FromInt(2);
+            m.m[0][2] = (xz + wy) * Fixed32::FromInt(2);
+            m.m[0][3] = Fixed32::Zero();
+
+            m.m[1][0] = (xy + wz) * Fixed32::FromInt(2);
+            m.m[1][1] = Fixed32::One() - (xx + zz) * Fixed32::FromInt(2);
+            m.m[1][2] = (yz - wx) * Fixed32::FromInt(2);
+            m.m[1][3] = Fixed32::Zero();
+
+            m.m[2][0] = (xz - wy) * Fixed32::FromInt(2);
+            m.m[2][1] = (yz + wx) * Fixed32::FromInt(2);
+            m.m[2][2] = Fixed32::One() - (xx + yy) * Fixed32::FromInt(2);
+            m.m[2][3] = Fixed32::Zero();
+
+            return m;
+        }
+    };
+    
+    struct Easing {
+        static Fixed32 Linear(Fixed32 t) { return t; }
+        static Fixed32 InQuad(Fixed32 t) { return t * t; }
+        static Fixed32 OutQuad(Fixed32 t) { return t * (Fixed32::FromInt(2) - t); }
+        static Fixed32 InOutQuad(Fixed32 t) {
+            if (t < Fixed32::FromFloat(0.5f)) return t * t * Fixed32::FromInt(2);
+            return (Fixed32::FromInt(4) - t * Fixed32::FromInt(2)) * t - Fixed32::One();
+        }
+    };
+}
+}
+
+namespace TTC {
+namespace IO {
+
+    class BinaryWriter {
+    private:
+        std::vector<uint8_t> buffer;
+    public:
+        void WriteInt32(int32_t value) {
+            size_t s = buffer.size();
+            buffer.resize(s + 4);
+            std::memcpy(buffer.data() + s, &value, 4);
+        }
+        void WriteFixed(TTC::Math::Fixed32 value) {
+            WriteInt32(value.raw);
+        }
+        void WriteVector2(const TTC::Math::Vector2& v) {
+            WriteFixed(v.x);
+            WriteFixed(v.y);
+        }
+        void WriteString(const std::string& str) {
+            WriteInt32((int32_t)str.size());
+            size_t s = buffer.size();
+            buffer.resize(s + str.size());
+            std::memcpy(buffer.data() + s, str.data(), str.size());
+        }
+        const std::vector<uint8_t>& GetBuffer() const { return buffer; }
+    };
+
+    class BinaryReader {
+    private:
+        const uint8_t* data;
+        size_t size;
+        size_t ptr;
+    public:
+        BinaryReader(const uint8_t* _data, size_t _size) : data(_data), size(_size), ptr(0) {}
+        
+        int32_t ReadInt32() {
+            if (ptr + 4 > size) return 0;
+            int32_t v;
+            std::memcpy(&v, data + ptr, 4);
+            ptr += 4;
+            return v;
+        }
+        TTC::Math::Fixed32 ReadFixed() {
+            return TTC::Math::Fixed32::FromRaw(ReadInt32());
+        }
+        TTC::Math::Vector2 ReadVector2() {
+            TTC::Math::Fixed32 x = ReadFixed();
+            TTC::Math::Fixed32 y = ReadFixed();
+            return TTC::Math::Vector2(x, y);
+        }
+        std::string ReadString() {
+            int32_t len = ReadInt32();
+            if (ptr + len > size || len < 0) return "";
+            std::string s((const char*)(data + ptr), len);
+            ptr += len;
+            return s;
+        }
+        bool Eof() const { return ptr >= size; }
+    };
+}
+}
+
+namespace TTC {
+namespace Physics {
+
+    using namespace TTC::Math;
+
+    struct AABB {
+        Vector2 min;
+        Vector2 max;
+
+        AABB() : min(Vector2::Zero()), max(Vector2::Zero()) {}
+        AABB(Vector2 _min, Vector2 _max) : min(_min), max(_max) {}
+
+        bool Intersects(const AABB& other) const {
+            if (max.x < other.min.x || min.x > other.max.x) return false;
+            if (max.y < other.min.y || min.y > other.max.y) return false;
+            return true;
+        }
+
+        bool Contains(const Vector2& point) const {
+            return point.x >= min.x && point.x <= max.x && point.y >= min.y && point.y <= max.y;
+        }
+        
+        static AABB FromCenterSize(Vector2 center, Vector2 size) {
+            Vector2 half = size / Fixed32::FromInt(2);
+            return AABB(center - half, center + half);
+        }
+    };
+
+    struct Collider {
+        TTC::Core::EntityID owner;
+        AABB bounds;
+        bool isStatic;
+        uint32_t layerMask;
+    };
+
+    class QuadTree {
+    private:
+        static constexpr int MAX_OBJECTS = 8;
+        static constexpr int MAX_LEVELS = 5;
+
+        struct Node {
+            int level;
+            std::vector<Collider*> objects;
+            AABB bounds;
+            Node* nodes[4];
+
+            Node(int lvl, AABB b) : level(lvl), bounds(b) {
+                for(int i=0; i<4; i++) nodes[i] = nullptr;
+            }
+            
+            ~Node() {
+                for(int i=0; i<4; i++) if(nodes[i]) delete nodes[i];
+            }
+        };
+
+        Node* root;
+        std::vector<Collider*> allColliders;
+
+        void Split(Node* node) {
+            Vector2 subSize = (node->bounds.max - node->bounds.min) / Fixed32::FromInt(2);
+            Fixed32 x = node->bounds.min.x;
+            Fixed32 y = node->bounds.min.y;
+
+            node->nodes[0] = new Node(node->level + 1, AABB(Vector2(x + subSize.x, y), Vector2(x + subSize.x * Fixed32::FromInt(2), y + subSize.y)));
+            node->nodes[1] = new Node(node->level + 1, AABB(Vector2(x, y), Vector2(x + subSize.x, y + subSize.y)));
+            node->nodes[2] = new Node(node->level + 1, AABB(Vector2(x, y + subSize.y), Vector2(x + subSize.x, y + subSize.y * Fixed32::FromInt(2))));
+            node->nodes[3] = new Node(node->level + 1, AABB(Vector2(x + subSize.x, y + subSize.y), Vector2(x + subSize.x * Fixed32::FromInt(2), y + subSize.y * Fixed32::FromInt(2))));
+        }
+
+        int GetIndex(Node* node, const AABB& pRect) {
+            int index = -1;
+            Vector2 center = node->bounds.min + (node->bounds.max - node->bounds.min) / Fixed32::FromInt(2);
+            bool topQuadrant = (pRect.min.y < center.y && pRect.max.y < center.y);
+            bool bottomQuadrant = (pRect.min.y > center.y);
+
+            if (pRect.min.x < center.x && pRect.max.x < center.x) {
+                if (topQuadrant) index = 1;
+                else if (bottomQuadrant) index = 2;
+            }
+            else if (pRect.min.x > center.x) {
+                if (topQuadrant) index = 0;
+                else if (bottomQuadrant) index = 3;
+            }
+            return index;
+        }
+
+        void Insert(Node* node, Collider* pRect) {
+            if (node->nodes[0] != nullptr) {
+                int index = GetIndex(node, pRect->bounds);
+                if (index != -1) {
+                    Insert(node->nodes[index], pRect);
+                    return;
+                }
+            }
+
+            node->objects.push_back(pRect);
+
+            if (node->objects.size() > MAX_OBJECTS && node->level < MAX_LEVELS) {
+                if (node->nodes[0] == nullptr) Split(node);
+                int i = 0;
+                while (i < node->objects.size()) {
+                    int index = GetIndex(node, node->objects[i]->bounds);
+                    if (index != -1) {
+                        Collider* c = node->objects[i];
+                        node->objects.erase(node->objects.begin() + i);
+                        Insert(node->nodes[index], c);
+                    } else {
+                        i++;
+                    }
+                }
+            }
+        }
+
+        void Retrieve(std::vector<Collider*>& returnObjects, Node* node, const AABB& pRect) {
+            int index = GetIndex(node, pRect);
+            if (index != -1 && node->nodes[0] != nullptr) {
+                Retrieve(returnObjects, node->nodes[index], pRect);
+            }
+            returnObjects.insert(returnObjects.end(), node->objects.begin(), node->objects.end());
+        }
+
+    public:
+        QuadTree(AABB bounds) {
+            root = new Node(0, bounds);
+        }
+
+        ~QuadTree() {
+            delete root;
+        }
+
+        void Clear() {
+            allColliders.clear();
+            delete root;
+            root = new Node(0, AABB(Vector2(Fixed32::FromInt(-1000), Fixed32::FromInt(-1000)), Vector2(Fixed32::FromInt(1000), Fixed32::FromInt(1000))));
+        }
+
+        void AddCollider(Collider* c) {
+            allColliders.push_back(c);
+            Insert(root, c);
+        }
+
+        std::vector<Collider*> Query(const AABB& area) {
+            std::vector<Collider*> result;
+            Retrieve(result, root, area);
+            return result;
+        }
+    };
+}
+}
+
+namespace TTC {
+namespace AI {
+
+    class IState {
+    public:
+        virtual ~IState() = default;
+        virtual void OnEnter() = 0;
+        virtual void OnUpdate(TTC::Math::Fixed32 dt) = 0;
+        virtual void OnExit() = 0;
+    };
+
+    class StateMachine {
+    private:
+        IState* currentState;
+        std::map<std::string, IState*> states;
+
+    public:
+        StateMachine() : currentState(nullptr) {}
+        
+        ~StateMachine() {
+            for(auto& pair : states) delete pair.second;
+            states.clear();
+        }
+
+        void AddState(const std::string& name, IState* state) {
+            states[name] = state;
+        }
+
+        void ChangeState(const std::string& name) {
+            if (states.find(name) == states.end()) return;
+            if (currentState) currentState->OnExit();
+            currentState = states[name];
+            currentState->OnEnter();
+        }
+
+        void Update(TTC::Math::Fixed32 dt) {
+            if (currentState) currentState->OnUpdate(dt);
+        }
+    };
+}
+}
+
+namespace TTC {
+namespace Events {
+
+    class IEvent {
+    public:
+        virtual ~IEvent() = default;
+    };
+
+    struct CollisionEvent : public IEvent {
+        TTC::Core::EntityID a;
+        TTC::Core::EntityID b;
+        CollisionEvent(TTC::Core::EntityID _a, TTC::Core::EntityID _b) : a(_a), b(_b) {}
+    };
+
+    class EventBus {
+    private:
+        using HandlerFunc = std::function<void(const IEvent&)>;
+        std::map<size_t, std::vector<HandlerFunc>> handlers;
+
+    public:
+        template<typename EventType>
+        void Subscribe(std::function<void(const EventType&)> handler) {
+            size_t typeId = typeid(EventType).hash_code();
+            handlers[typeId].push_back([handler](const IEvent& e) {
+                handler(static_cast<const EventType&>(e));
+            });
+        }
+
+        template<typename EventType>
+        void Publish(const EventType& event) {
+            size_t typeId = typeid(EventType).hash_code();
+            if (handlers.find(typeId) != handlers.end()) {
+                for (auto& handler : handlers[typeId]) {
+                    handler(event);
+                }
+            }
+        }
+    };
+
+    extern EventBus* GEventBus;
+}
+}
+
 #endif
